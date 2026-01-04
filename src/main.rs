@@ -1,63 +1,89 @@
-use chrono::Local;
-use color_eyre::Result;
-use color_eyre::eyre::{Ok, ensure};
-use encoding_rs::SHIFT_JIS;
-use mp4::Mp4Reader;
-use std::env::args;
 use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::Write;
 
-const HEADER: &str = &include_str!("header.txt");
-const FPS: u32 = 30;
+use chrono::Local;
+use clap::Parser;
+use color_eyre::Result;
+use color_eyre::eyre::Ok;
+use encoding_rs::SHIFT_JIS;
 
-fn format_entry(i: usize, offset: u128, filepath: &str) -> Result<(String, u128)> {
-    let f = File::open(filepath)?;
-    let size = f.metadata()?.len();
-    let reader = BufReader::new(f);
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(num_args = 2..)]
+    files: Vec<String>,
 
-    let mp4 = Mp4Reader::read_header(reader, size)?;
-    let length = mp4.duration().as_millis() * (FPS as u128) / 1000;
+    #[arg(short, long, default_value_t = 30)]
+    fps: u32,
+}
 
-    let group_id = i + 1;
-    let video_id = 2 * i + 0;
-    let audio_id = 2 * i + 1;
-    let start = offset + 1;
-    let end = offset + length;
+struct Entry<'a> {
+    filepath: &'a String,
+    group_id: usize,
+    video_id: usize,
+    audio_id: usize,
+    length: u128,
+}
 
-    Ok((
+impl Entry<'_> {
+    fn to_string_video(&self, offset: u128) -> String {
         format!(
-            include_str!("entry.txt"),
-            arg = filepath,
-            group_id = group_id,
-            video_id = video_id,
-            audio_id = audio_id,
-            start = start,
-            end = end,
-        ),
-        length,
-    ))
+            include_str!("video.txt"),
+            filepath = self.filepath,
+            group_id = self.group_id,
+            object_id = self.video_id,
+            start = offset,
+            end = offset + self.length,
+        )
+    }
+    fn to_string_audio(&self, offset: u128) -> String {
+        format!(
+            include_str!("audio.txt"),
+            filepath = self.filepath,
+            group_id = self.group_id,
+            object_id = self.audio_id,
+            start = offset,
+            end = offset + self.length,
+        )
+    }
 }
 
 fn main() -> Result<()> {
     color_eyre::install()?;
 
+    let args = Args::parse();
+
     let now = Local::now();
     let filepath = format!("aviutl-drop-rs-{}.exo", now.format("%Y%m%d-%H%M%S"));
 
-    let mut buffer = String::new();
+    let mut entries: Vec<Entry> = Vec::new();
 
-    buffer.push_str(HEADER);
+    for (i, filepath) in args.files.iter().enumerate() {
+        let file = File::open(filepath)?;
+        let mp4reader = mp4::read_mp4(file)?;
+        let length = mp4reader.duration().as_millis() * 30 / 1000;
 
-    let mut offset = 0;
+        println!("{}: {:?}", filepath, length);
 
-    let filepaths: Vec<_> = args().skip(1).collect();
+        entries.push(Entry {
+            filepath: filepath,
+            group_id: i + 1,
+            video_id: i,
+            audio_id: args.files.len() + i,
+            length,
+        });
+    }
 
-    ensure!(!filepaths.is_empty());
+    let mut buffer: String = String::from(format!(
+        include_str!("header.txt"),
+        length = entries.iter().map(|entry| entry.length).sum::<u128>() + entries.len() as u128
+    ));
 
-    for (i, filepath) in filepaths.iter().enumerate() {
-        let (string, length) = format_entry(i, offset, &filepath)?;
-        buffer.push_str(&string);
-        offset += length;
+    let mut offset = 1;
+    for entry in &entries {
+        buffer.push_str(&entry.to_string_video(offset));
+        buffer.push_str(&entry.to_string_audio(offset));
+        offset += entry.length + 1;
     }
 
     let (cow, _encoding_used, _had_errors) = SHIFT_JIS.encode(&buffer);

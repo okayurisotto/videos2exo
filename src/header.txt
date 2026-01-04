@@ -3,6 +3,6 @@ width=1920
 height=1080
 rate=30
 scale=1
-length=18000
+length={length}
 audio_rate=44100
 audio_ch=2
