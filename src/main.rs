@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 
 use chrono::Local;
 use clap::Parser;
@@ -10,11 +10,13 @@ use encoding_rs::SHIFT_JIS;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// exoファイルに含めたいmp4ファイル
     #[arg(num_args = 2..)]
     files: Vec<String>,
 
+    /// 編集プロジェクトのフレームレート
     #[arg(short, long, default_value_t = 30)]
-    fps: u32,
+    fps: u128,
 }
 
 struct Entry<'a> {
@@ -22,28 +24,28 @@ struct Entry<'a> {
     group_id: usize,
     video_id: usize,
     audio_id: usize,
-    length: u128,
+    duration: u64,
 }
 
 impl Entry<'_> {
-    fn to_string_video(&self, offset: u128) -> String {
+    fn to_string_video(&self, offset: u64) -> String {
         format!(
             include_str!("video.txt"),
             filepath = self.filepath,
             group_id = self.group_id,
             object_id = self.video_id,
             start = offset,
-            end = offset + self.length,
+            end = offset + self.duration,
         )
     }
-    fn to_string_audio(&self, offset: u128) -> String {
+    fn to_string_audio(&self, offset: u64) -> String {
         format!(
             include_str!("audio.txt"),
             filepath = self.filepath,
             group_id = self.group_id,
             object_id = self.audio_id,
             start = offset,
-            end = offset + self.length,
+            end = offset + self.duration,
         )
     }
 }
@@ -54,42 +56,50 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let now = Local::now();
-    let filepath = format!("aviutl-drop-rs-{}.exo", now.format("%Y%m%d-%H%M%S"));
+    let exo_path = format!("videos2exo-{}.exo", now.format("%Y%m%d-%H%M%S"));
 
     let mut entries: Vec<Entry> = Vec::new();
 
-    for (i, filepath) in args.files.iter().enumerate() {
-        let file = File::open(filepath)?;
-        let mp4reader = mp4::read_mp4(file)?;
-        let length = mp4reader.duration().as_millis() * 30 / 1000;
+    for (i, video_path) in args.files.iter().enumerate() {
+        let video_file = File::open(video_path)?;
+        let mp4reader = mp4::read_mp4(video_file)?;
+        let duration = (mp4reader.duration().as_millis() * args.fps / 1000) as u64;
 
-        println!("{}: {:?}", filepath, length);
+        println!("{}: {:?}", video_path, duration);
 
         entries.push(Entry {
-            filepath: filepath,
+            filepath: video_path,
             group_id: i + 1,
             video_id: i,
             audio_id: args.files.len() + i,
-            length,
+            duration,
         });
     }
 
-    let mut buffer: String = String::from(format!(
+    let exo_file = File::create(exo_path)?;
+    let mut exo_writer = BufWriter::new(exo_file);
+
+    let header = format!(
         include_str!("header.txt"),
-        length = entries.iter().map(|entry| entry.length).sum::<u128>() + entries.len() as u128
-    ));
+        length = entries.iter().map(|entry| entry.duration).sum::<u64>() + entries.len() as u64
+    );
+    exo_writer.write_all(header.as_bytes())?;
 
     let mut offset = 1;
     for entry in &entries {
-        buffer.push_str(&entry.to_string_video(offset));
-        buffer.push_str(&entry.to_string_audio(offset));
-        offset += entry.length + 1;
+        let chunk = entry.to_string_video(offset);
+        let (encoded, _, _) = &SHIFT_JIS.encode(&chunk);
+        exo_writer.write_all(encoded)?;
+        offset += entry.duration + 1;
     }
 
-    let (cow, _encoding_used, _had_errors) = SHIFT_JIS.encode(&buffer);
-
-    let mut file = File::create(filepath)?;
-    file.write_all(&cow)?;
+    let mut offset = 1;
+    for entry in &entries {
+        let chunk = entry.to_string_audio(offset);
+        let (encoded, _, _) = &SHIFT_JIS.encode(&chunk);
+        exo_writer.write_all(encoded)?;
+        offset += entry.duration + 1;
+    }
 
     Ok(())
 }
